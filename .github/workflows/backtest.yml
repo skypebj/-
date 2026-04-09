@@ -1,0 +1,44 @@
+name: 股票轮动策略回测
+
+on:
+  # 手动触发
+  workflow_dispatch:
+  # 每天北京时间 09:00 运行（UTC 01:00）
+  schedule:
+    - cron: '0 1 * * *'
+  # 也可以推送到 main 分支时运行（可选）
+  # push:
+  #   branches: [ main ]
+
+jobs:
+  run-backtest:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置 Python 3.9
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+
+    - name: 安装依赖
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: 运行回测脚本
+      run: python strategy.py
+
+    - name: 保存回测结果（可选）
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: backtest-results
+        path: |
+          *.png
+          *.csv
+          *.log
+        retention-days: 30
