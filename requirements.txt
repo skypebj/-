@@ -1,0 +1,6 @@
+backtrader>=1.9.78
+akshare>=1.12.0
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+python-dateutil>=2.8.0
