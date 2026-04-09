@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-股票/ETF 轮动策略回测
+股票/ETF 轮动策略回测（日线，无WR）
 - 买入：每月倒数第2个交易日
 - 卖出：次月第8个交易日
 - 过滤：沪深300 >= 20日均线
@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 import datetime
 from dateutil.relativedelta import relativedelta
+from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -38,9 +39,9 @@ STOCK_COST = 0.0005         # 股票买卖成本 0.05%（印花税+佣金）
 DIVIDEND_TAX = 0.20         # 股息税 20%
 DIVIDEND_RATE = 0.0416      # 年化股息率 4.16%（税前）
 
-# ==================== 数据获取（含分红记录） ====================
+# ==================== 数据获取（含多种接口备选） ====================
 def fetch_daily_data(symbol, stock_type='etf', start=None, end=None):
-    """获取日线数据（未复权），返回 DataFrame"""
+    """获取日线数据（未复权），支持多种接口，返回 DataFrame"""
     cache_file = f"data_{symbol}.csv"
     try:
         df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
@@ -49,36 +50,79 @@ def fetch_daily_data(symbol, stock_type='etf', start=None, end=None):
     except FileNotFoundError:
         pass
 
-    if stock_type == 'etf':
-        # ETF 历史数据（前复权，但为了分红处理我们使用未复权，akshare默认未复权）
-        df = ak.fund_etf_hist_em(symbol=symbol, period="daily",
-                                 start_date=start, end_date=end,
-                                 adjust="")   # 空字符串表示不复权
-        if df.empty:
-            raise ValueError(f"无法获取 {symbol} 数据")
-        df.index = pd.to_datetime(df["日期"])
-        df = df[["开盘", "收盘", "最高", "最低", "成交量"]]
-        df.columns = ["open", "close", "high", "low", "volume"]
-    elif stock_type == 'stock':
-        df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                start_date=start, end_date=end,
-                                adjust="")   # 不复权
-        if df.empty:
-            raise ValueError(f"无法获取 {symbol} 数据")
-        df.index = pd.to_datetime(df["日期"])
-        df = df[["开盘", "收盘", "最高", "最低", "成交量"]]
-        df.columns = ["open", "close", "high", "low", "volume"]
-    elif stock_type == 'index':
-        # 沪深300指数
-        df = ak.stock_zh_index_daily(symbol=f"sh{symbol}")
-        df.index = pd.to_datetime(df["date"])
-        df = df[["open", "close", "high", "low", "volume"]]
-        df.columns = ["open", "close", "high", "low", "volume"]
-        df = df[start:end]
-    else:
-        raise ValueError("stock_type must be etf/stock/index")
+    # 统一日期格式（用于接口）
+    start_str = start.replace('-', '') if start else None
+    end_str = end.replace('-', '') if end else None
 
-    # 保存缓存
+    df = None
+    if stock_type == 'etf':
+        # 方法1：尝试 stock_zh_a_hist（ETF 可当作股票）
+        try:
+            df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
+                                    start_date=start_str, end_date=end_str,
+                                    adjust="")
+            if df is not None and not df.empty:
+                print(f"使用 stock_zh_a_hist 获取 {symbol} 成功")
+        except Exception as e:
+            print(f"stock_zh_a_hist 失败: {e}")
+
+        # 方法2：尝试 fund_etf_hist_em
+        if df is None or df.empty:
+            try:
+                df = ak.fund_etf_hist_em(symbol=symbol, period="daily",
+                                         start_date=start_str, end_date=end_str,
+                                         adjust="")
+                if df is not None and not df.empty:
+                    print(f"使用 fund_etf_hist_em 获取 {symbol} 成功")
+            except Exception as e:
+                print(f"fund_etf_hist_em 失败: {e}")
+
+        # 方法3：尝试 fund_etf_hist_sina
+        if df is None or df.empty:
+            try:
+                df = ak.fund_etf_hist_sina(symbol=symbol)
+                if df is not None and not df.empty:
+                    df.index = pd.to_datetime(df["date"])
+                    if start:
+                        df = df[start:end]
+                    print(f"使用 fund_etf_hist_sina 获取 {symbol} 成功")
+            except Exception as e:
+                print(f"fund_etf_hist_sina 失败: {e}")
+
+    elif stock_type == 'stock':
+        try:
+            df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
+                                    start_date=start_str, end_date=end_str,
+                                    adjust="")
+            print(f"使用 stock_zh_a_hist 获取股票 {symbol} 成功")
+        except Exception as e:
+            print(f"股票 {symbol} 获取失败: {e}")
+
+    elif stock_type == 'index':
+        # 沪深300指数代码 "000300"
+        try:
+            df = ak.stock_zh_index_daily(symbol=f"sh{symbol}")
+            df.index = pd.to_datetime(df["date"])
+            if start:
+                df = df[start:end]
+            print(f"使用 stock_zh_index_daily 获取指数 {symbol} 成功")
+        except Exception as e:
+            print(f"指数 {symbol} 获取失败: {e}")
+
+    if df is None or df.empty:
+        raise ValueError(f"无法获取 {symbol} 数据，请检查网络或 AKShare 接口")
+
+    # 统一列名
+    df = df.rename(columns={
+        "日期": "date",
+        "开盘": "open",
+        "收盘": "close",
+        "最高": "high",
+        "最低": "low",
+        "成交量": "volume"
+    })
+    df = df[["open", "close", "high", "low", "volume"]]
+    df.columns = ["open", "close", "high", "low", "volume"]
     df.to_csv(cache_file)
     print(f"下载并保存 {symbol} 数据，共 {len(df)} 行")
     return df
@@ -111,7 +155,6 @@ def fetch_dividend_data(stock_code):
         years = range(2007, 2027)
         dates = [datetime.date(y, 6, 30) for y in years]
         div_df = pd.DataFrame(index=pd.DatetimeIndex(dates))
-        # 根据净股息率反推每股股利（需要当前价格，这里填0，实际在回测中动态计算）
         div_df["dividend_per_share"] = 0.0
         return div_df
 
@@ -120,213 +163,6 @@ class RotationStrategy(bt.Strategy):
     """
     日线轮动策略（无WR）
     """
-    params = (
-        ('momentum_period', 20),      # 动量周期
-        ('ma_period', 20),            # 均线周期
-        ('etf_cost', ETF_COST),
-        ('stock_cost', STOCK_COST),
-        ('dividend_tax', DIVIDEND_TAX),
-        ('defense_dividend_rate', DIVIDEND_RATE),
-    )
-
-    def __init__(self):
-        # 数据线别名
-        self.hs300 = self.datas[0]      # 沪深300
-        self.chn = self.datas[1]        # 创业板ETF
-        self.sp = self.datas[2]         # 标普500ETF
-        self.defense = self.datas[3]    # 交通银行
-
-        # 指标：沪深300 MA20
-        self.ma20 = bt.ind.SimpleMovingAverage(self.hs300.close, period=self.p.ma_period)
-
-        # 20日动量 (当前价 / 20日前价 - 1)
-        self.mom_chn = (self.chn.close / self.chn.close(-self.p.momentum_period)) - 1
-        self.mom_sp  = (self.sp.close / self.sp.close(-self.p.momentum_period)) - 1
-
-        # 交易状态
-        self.order = None
-        self.current_target = None   # 当前持有标的代号: 'chn', 'sp', 'defense'
-        self.next_buy_date = None    # 下一个买入日
-        self.next_sell_date = None   # 下一个卖出日
-
-        # 分红数据（仅对防御股）
-        self.dividend_records = fetch_dividend_data(DEFENSE_STOCK)
-        self.last_dividend_date = None
-
-    def log(self, txt, dt=None):
-        dt = dt or self.datas[0].datetime.date(0)
-        print(f"{dt.isoformat()} {txt}")
-
-    def notify_order(self, order):
-        if order.status in [order.Completed]:
-            if order.isbuy():
-                self.log(f"买入 {order.data._name}  {order.executed.price:.3f} 数量 {order.executed.size}")
-            else:
-                self.log(f"卖出 {order.data._name}  {order.executed.price:.3f} 数量 {order.executed.size}")
-            self.order = None
-
-    def notify_cashvalue(self, cash, value):
-        self.cash = cash
-        self.value = value
-
-    def _is_last_second_trading_day(self, date):
-        """判断是否为当月倒数第二个交易日（基于数据中的交易日历）"""
-        # 获取当前月份的所有交易日（从数据中获取，但这里简化：使用当前数据的日期列表）
-        # 由于backtrader中无法直接获取未来交易日，我们通过检查下一天是否为下个月来判断
-        # 方法：获取当前日期在当月的序号，并检查本月剩余交易日数量
-        # 简便方法：从当前日期开始，往后找2个交易日，如果跨越月份，则当前是倒数第二或第一？
-        # 更可靠：利用数据中的日期索引，但我们无法直接访问。换一种方式：
-        # 使用pandas日期功能：获取当前月份最后一天，然后往前推2个交易日
-        # 由于策略只在next中调用，我们可以在外部预处理一个布尔列表传入，但为了简洁，我们在这里实现：
-        # 获取当前数据的时间序列（通过self.datas[0].datetime.array 但不可直接获取）
-        # 替代方案：在策略初始化时，预先计算每个日期的买卖标志，存入lines。
-        # 为了让代码简单且可读，我们在next中动态判断：检查下一个交易日是否属于下个月，且下下个交易日也属于下个月？
-        # 但不够准确。推荐在初始化时预计算所有日期的标志，然后通过一个line来访问。
-        # 这里给出预计算方法：
-        pass
-
-    def _precompute_trade_dates(self):
-        """预计算每个数据点的买入日和卖出日标志（在策略start中调用）"""
-        # 获取所有数据的时间索引（取第一个数据的日期）
-        dates = [self.datas[0].datetime.date(i) for i in range(len(self.datas[0]))]
-        self.buy_flag = [False] * len(dates)
-        self.sell_flag = [False] * len(dates)
-
-        # 生成交易日历（去重）
-        trading_days = sorted(set(dates))
-        # 按月分组
-        from collections import defaultdict
-        month_days = defaultdict(list)
-        for d in trading_days:
-            month_days[(d.year, d.month)].append(d)
-
-        # 计算每月倒数第二个交易日
-        for (year, month), days in month_days.items():
-            if len(days) >= 2:
-                last_second = days[-2]
-                # 找到该日期在原始dates中的索引
-                idx = dates.index(last_second)
-                self.buy_flag[idx] = True
-
-        # 计算次月第8个交易日
-        for i, d in enumerate(trading_days):
-            # 计算下个月的第8个交易日
-            next_month = d + relativedelta(months=1)
-            next_month_days = [dd for dd in trading_days if dd.year == next_month.year and dd.month == next_month.month]
-            if len(next_month_days) >= 8:
-                sell_day = next_month_days[7]  # 索引7即第8个
-                if d == sell_day:
-                    self.sell_flag[i] = True
-        # 注意：上面的循环会标记卖出日，但每个卖出日只对应一个买入日关系。实际上我们需要在买入日后的次月第8个交易日卖出，
-        # 所以更准确的做法是：对每个买入日，计算对应的卖出日。但上面的方法会标记所有满足“当天是某个月的第8个交易日”的日期，
-        # 如果某个月的第8个交易日恰好也是另一个月的倒数第二天？不影响，因为卖出日总是先于下一个买入日。
-        # 我们将这些标志存储为策略的lines，以便在next中快速访问。
-        # 由于backtrader lines动态性，我们简单存储为列表，并在next中用索引访问。
-        self.buy_flags = self.buy_flag
-        self.sell_flags = self.sell_flag
-
-    def start(self):
-        # 预计算买卖日期
-        self._precompute_trade_dates()
-
-    def next(self):
-        if self.order:
-            return  # 等待订单完成
-
-        # 获取当前数据索引
-        idx = len(self.datas[0]) - 1  # 当前bar的索引
-        current_date = self.datas[0].datetime.date(0)
-
-        # 1. 检查卖出日
-        if self.sell_flags[idx]:
-            # 卖出所有持仓
-            for data in [self.chn, self.sp, self.defense]:
-                if self.getposition(data).size > 0:
-                    self.order = self.close(data)
-                    self.current_target = None
-                    return
-
-        # 2. 检查买入日
-        if self.buy_flags[idx]:
-            # 先平仓（防止上月卖出日未执行的情况）
-            for data in [self.chn, self.sp, self.defense]:
-                if self.getposition(data).size > 0:
-                    self.close(data)
-
-            # 获取过滤条件：沪深300 >= MA20
-            hs300_close = self.hs300.close[0]
-            ma20_val = self.ma20[0]
-            filter_ok = hs300_close >= ma20_val
-
-            if filter_ok:
-                # 计算20日动量，选择强者
-                mom_c = self.mom_chn[0]
-                mom_s = self.mom_sp[0]
-                if mom_c >= mom_s:
-                    target = self.chn
-                    target_name = "创业板ETF"
-                else:
-                    target = self.sp
-                    target_name = "标普500ETF"
-                self.log(f"买入条件满足，动量({mom_c:.4f},{mom_s:.4f}) 选择 {target_name}")
-            else:
-                target = self.defense
-                target_name = "交通银行(防御)"
-                self.log(f"沪深300({hs300_close:.2f}) < MA20({ma20_val:.2f})，转入防御品种")
-
-            # 全仓买入
-            cash = self.broker.get_cash()
-            size = int(cash / target.close[0])
-            if size > 0:
-                self.order = self.buy(target, size=size)
-                self.current_target = target_name
-
-    def notify_trade(self, trade):
-        """交易完成后的手续费记录"""
-        if trade.isclosed:
-            self.log(f"交易毛利 {trade.pnl:.2f} 净利 {trade.pnlcomm:.2f}")
-
-    def next_month_dividend(self):
-        """处理防御品种的分红（在每年的除息日）"""
-        # 仅在持有交通银行时处理分红
-        pos = self.getposition(self.defense)
-        if pos.size == 0:
-            return
-
-        current_date = self.datas[0].datetime.date(0)
-        # 检查分红记录中是否有今天的除息日
-        if current_date in self.dividend_records.index:
-            div_per_share = self.dividend_records.loc[current_date, "dividend_per_share"]
-            if div_per_share > 0:
-                # 税前红利总额
-                gross_div = div_per_share * pos.size
-                net_div = gross_div * (1 - self.p.dividend_tax)
-                self.broker.add_cash(net_div)
-                self.log(f"收到 {DEFENSE_STOCK} 分红: 税前 {gross_div:.2f} 税后 {net_div:.2f}")
-        else:
-            # 如果没有实际分红数据，使用固定股息率模拟（每年一次，在6月30日）
-            if current_date.month == 6 and current_date.day == 30:
-                if self.last_dividend_date != current_date.year:
-                    # 按当日市值估算税前红利
-                    value = pos.size * self.defense.close[0]
-                    gross_div = value * self.p.defense_dividend_rate
-                    net_div = gross_div * (1 - self.p.dividend_tax)
-                    self.broker.add_cash(net_div)
-                    self.log(f"模拟分红: 市值 {value:.2f} 税后 {net_div:.2f}")
-                    self.last_dividend_date = current_date.year
-
-    def next(self):
-        # 原有的next逻辑保留，上面已经定义了一个next，这里重写会覆盖，所以需要合并。
-        # 由于上面已经写了next，这里不能再写一个。我将上面的next内容复制过来，并加入分红调用。
-        # 实际代码中只有一个next方法，我将上面的next删除，用这个合并后的。
-        pass
-
-# 修复：上面定义了两个next，需要整合。将下面代码替换上面的next方法。
-# 由于在代码编写中已经写了第一个next，但后面又写了一个占位，会导致错误。我们重新组织一下策略类，确保只有一个next。
-# 下面是完整的策略类（修正版）。
-
-# ==================== 修正版策略类（整合所有逻辑） ====================
-class RotationStrategyFinal(bt.Strategy):
     params = (
         ('momentum_period', 20),
         ('ma_period', 20),
@@ -337,15 +173,20 @@ class RotationStrategyFinal(bt.Strategy):
     )
 
     def __init__(self):
+        # 数据线别名
         self.hs300 = self.datas[0]
         self.chn = self.datas[1]
         self.sp = self.datas[2]
         self.defense = self.datas[3]
 
+        # 指标：沪深300 MA20
         self.ma20 = bt.ind.SimpleMovingAverage(self.hs300.close, period=self.p.ma_period)
+
+        # 20日动量 (当前价 / 20日前价 - 1)
         self.mom_chn = (self.chn.close / self.chn.close(-self.p.momentum_period)) - 1
         self.mom_sp  = (self.sp.close / self.sp.close(-self.p.momentum_period)) - 1
 
+        # 交易状态
         self.order = None
         self.current_target = None
         self.buy_flags = []
@@ -369,7 +210,6 @@ class RotationStrategyFinal(bt.Strategy):
         # 预计算买卖日期
         dates = [self.datas[0].datetime.date(i) for i in range(len(self.datas[0]))]
         trading_days = sorted(set(dates))
-        from collections import defaultdict
         month_days = defaultdict(list)
         for d in trading_days:
             month_days[(d.year, d.month)].append(d)
@@ -500,28 +340,15 @@ def run_backtest():
     cerebro.adddata(data_sp)
     cerebro.adddata(data_defense)
 
-    cerebro.addstrategy(RotationStrategyFinal)
+    cerebro.addstrategy(RotationStrategy)
 
     # 设置初始资金
     cerebro.broker.setcash(INIT_CASH)
 
-    # 设置佣金（分别针对ETF和股票，但统一用setcommission会覆盖，我们通过策略中动态设置？Backtrader不支持按不同证券设置不同佣金，可以在策略中每次交易前设置？不完美）
-    # 简便方法：在cerebro中设置一个默认佣金，然后在策略的next中根据交易品种动态修改broker的commission？太复杂。
-    # 另一种：使用两个不同的数据对应的佣金，可以通过重写getcommission。这里我们简单设置一个平均成本0.045%？不对，用户要求ETF0.042%，股票0.05%。
-    # 我们可以在策略中，在买入卖出时手动扣除？但backtrader自动计算。可以使用setcommission参数中，通过判断数据名称来设置不同佣金。
-    # 通过创建一个自定义佣金方案：
-    class FixedCommInfo(bt.CommissionInfo):
-        def getsize(self, data, cash):
-            return super().getsize(data, cash)
-
-    # 更简单：分别对每个数据设置佣金
+    # 分别设置不同品种的佣金
     cerebro.broker.addcommissioninfo(bt.CommissionInfo(commission=ETF_COST, name='159915'))
     cerebro.broker.addcommissioninfo(bt.CommissionInfo(commission=ETF_COST, name='513500'))
     cerebro.broker.addcommissioninfo(bt.CommissionInfo(commission=STOCK_COST, name='601328'))
-    # 沪深300指数不交易，佣金无关
-
-    # 设置滑点（可选）
-    cerebro.broker.set_slippage_perc(0.0001)
 
     # 添加分析器
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
@@ -557,8 +384,14 @@ def run_backtest():
     total_trades = trades.total.total if hasattr(trades, 'total') else 0
     print(f"总交易次数: {total_trades}")
 
-    # 可选：绘制结果
-    cerebro.plot(style='candlestick')
+    # 可选：保存净值曲线图（适用于非交互环境）
+    try:
+        import matplotlib.pyplot as plt
+        fig = cerebro.plot(style='candlestick')[0][0]
+        fig.savefig('backtest_result.png')
+        print("净值曲线已保存为 backtest_result.png")
+    except Exception as e:
+        print(f"绘图失败: {e}")
 
 if __name__ == "__main__":
     run_backtest()
